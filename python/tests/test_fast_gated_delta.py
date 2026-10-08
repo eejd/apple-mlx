@@ -1,4 +1,3 @@
-import os
 import unittest
 
 import mlx.core as mx
@@ -247,7 +246,7 @@ class TestGatedDelta(mlx_tests.MLXTestCase):
 
     @unittest.skipIf(not mx.metal.is_available(), "Metal is not available")
     def test_gated_delta_sequential(self):
-        os.environ["GATED_DELTA_CHUNK"] = "0"
+        mx.config.update("GATED_DELTA_CHUNK", 0)
         for dims in self.gpu_dims:
             (out, hf), (out_ref, hf_ref) = runner(dims, reference=False)
             msg = f"Failed on Dimensions: {dims}"
@@ -260,7 +259,7 @@ class TestGatedDelta(mlx_tests.MLXTestCase):
 
     @unittest.skipIf(not mx.metal.is_available(), "Metal is not available")
     def test_gated_delta_simdgroup(self):
-        os.environ["GATED_DELTA_CHUNK"] = "8"
+        mx.config.update("GATED_DELTA_CHUNK", 8)
         for dims in self.gpu_dims:
             (out, hf), (out_ref, hf_ref) = runner(dims, reference=False)
             msg = f"Failed on Dimensions: {dims}"
@@ -273,7 +272,7 @@ class TestGatedDelta(mlx_tests.MLXTestCase):
 
     @unittest.skipIf(not mx.metal.is_available(), "Metal is not available")
     def test_gated_delta_nax(self):
-        os.environ["GATED_DELTA_CHUNK"] = "16"
+        mx.config.update("GATED_DELTA_CHUNK", 16)
         for dims in self.gpu_dims:
             (out, hf), (out_ref, hf_ref) = runner(dims, reference=False)
             msg = f"Failed on Dimensions: {dims}"
