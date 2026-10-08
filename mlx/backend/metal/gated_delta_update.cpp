@@ -77,11 +77,11 @@ void GatedDeltaUpdate::eval_gpu(
   int Dv = v.shape(3);
 
   int C = 1;
-  int threshold = env::get_var("GATED_DELTA_THRESH", 16);
+  int threshold = config::get("GATED_DELTA_THRESH", 16);
   if (T >= threshold)
     C = metal::is_nax_available() ? 16 : 8;
 
-  C = env::get_var("GATED_DELTA_CHUNK", C);
+  C = config::get("GATED_DELTA_CHUNK", C);
 
   if (!metal::is_nax_available())
     C = std::min(C, 8); // override in case nax is not available.

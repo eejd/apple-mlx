@@ -8,7 +8,7 @@
 
 #include "mlx/backend/metal/device.h"
 #include "mlx/backend/metal/resident.h"
-#include "mlx/utils.h"
+#include "mlx/config.h"
 
 namespace mlx::core::metal {
 
@@ -19,7 +19,11 @@ ResidencySets::ResidencySets(MTL::Device* d) {
   if (__builtin_available(macOS 15, iOS 18, *)) {
     device_ = d;
     enabled_ = true;
-    int pct = env::residency_set_max_pct();
+    // Per-set residency-set size, as a percentage of the device's recommended
+    // max working-set size. Controls only how wired memory is distributed
+    // across residency sets, never how much is wired; see metal::ResidencySets.
+    // A value <= 0 or >= 100 puts everything in a single set.
+    int pct = config::get("MLX_RESIDENCY_SET_MAX_PCT", 5);
     if (pct <= 0 || pct >= 100) {
       max_bytes_per_set_ = 0; // a single set holds everything
     } else {
@@ -67,7 +71,7 @@ bool ResidencySets::add_set_locked(NS::Error** error_out) {
   }
   sets_.push_back(Set{std::move(set), 0});
   num_sets_.store(sets_.size(), std::memory_order_release);
-  if (env::residency_debug()) {
+  if (config::get("MLX_RESIDENCY_DEBUG", 0)) {
     fprintf(
         stderr,
         "[residency] created residency set %zu (max_bytes_per_set=%zu MB)\n",
