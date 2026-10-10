@@ -4,12 +4,68 @@
 
 #include <cmath>
 #include <limits>
+#include <vector>
 
+#include "mlx/config.h"
 #include "mlx/mlx.h"
 #include "mlx/ops.h"
 
 using namespace mlx::core;
 using namespace mlx::core::linalg;
+
+namespace {
+
+// float32 matmul may run at reduced (TF32-class) precision on GPUs with
+// matrix units; see docs/src/usage/precision.rst. The factorizations below run
+// on the CPU but are verified with matmul on the default device, so every such
+// check runs twice: once with MLX_ENABLE_TF32=0, where the original float32
+// tolerances apply unchanged, and once with MLX_ENABLE_TF32=1, where the
+// tolerance is widened by the error bound of the reduced-precision format.
+//
+// TF32 keeps 10 explicit mantissa bits, so rounding (or truncating) one input
+// has relative error below 2^-10, and the product of two rounded inputs below
+// 2 * 2^-10. Accumulation stays in float32. A chain of n factors therefore
+// differs from the float32 product by at most about
+// 2 * (n - 1) * 2^-10 * (|F1| @ |F2| @ ... @ |Fn|).
+constexpr float tf32_input_error = 1.0f / 1024;
+
+struct MatmulPrecision {
+  bool tf32;
+};
+
+// Run `check` under MLX_ENABLE_TF32=0 and MLX_ENABLE_TF32=1. On hardware
+// without reduced-precision matmul the second pass is a repeat of the first.
+template <typename F>
+void for_each_matmul_precision(F&& check) {
+  for (int tf32 : {0, 1}) {
+    CAPTURE(tf32);
+    auto scope = config::scoped_update({{"MLX_ENABLE_TF32", tf32}});
+    check(MatmulPrecision{tf32 != 0});
+  }
+}
+
+// allclose(out, expected, rtol, atol) where `out` is the matmul chain of
+// `factors`, with the tolerance widened under TF32 as described above.
+bool matmul_close(
+    const array& out,
+    const array& expected,
+    const std::vector<array>& factors,
+    MatmulPrecision precision,
+    float rtol = 1e-5,
+    float atol = 1e-8) {
+  auto tol = atol + rtol * abs(expected);
+  if (precision.tf32) {
+    auto magnitude = abs(factors[0], Device::cpu);
+    for (size_t i = 1; i < factors.size(); ++i) {
+      magnitude = matmul(magnitude, abs(factors[i], Device::cpu), Device::cpu);
+    }
+    float scale = 2.0f * (factors.size() - 1) * tf32_input_error;
+    tol = tol + scale * magnitude;
+  }
+  return all(less_equal(abs(out - expected), tol)).item<bool>();
+}
+
+} // namespace
 
 TEST_CASE("[mlx.core.linalg.norm] no ord") {
   // Zero dimensions
@@ -366,10 +422,10 @@ TEST_CASE("test QR factorization") {
 
   array A = array({2., 3., 1., 2.}, {2, 2});
   auto [Q, R] = linalg::qr(A, Device::cpu);
-  auto out = matmul(Q, R);
-  CHECK(allclose(out, A).item<bool>());
-  out = matmul(Q, Q);
-  CHECK(allclose(out, eye(2), 1e-5, 1e-7).item<bool>());
+  for_each_matmul_precision([&](MatmulPrecision p) {
+    CHECK(matmul_close(matmul(Q, R), A, {Q, R}, p));
+    CHECK(matmul_close(matmul(Q, Q), eye(2), {Q, Q}, p, 1e-5, 1e-7));
+  });
   CHECK(allclose(tril(R, -1), zeros_like(R)).item<bool>());
   CHECK_EQ(Q.dtype(), float32);
   CHECK_EQ(R.dtype(), float32);
@@ -398,10 +454,16 @@ TEST_CASE("test SVD factorization") {
 
   const auto U_slice = slice(U, {0, 0}, {U.shape(0), S.shape(0)});
 
-  const auto A_again = matmul(matmul(U_slice, diag(S)), Vt);
-
-  CHECK(
-      allclose(A_again, A, /* rtol = */ 1e-3, /* atol = */ 1e-3).item<bool>());
+  for_each_matmul_precision([&](MatmulPrecision p) {
+    const auto A_again = matmul(matmul(U_slice, diag(S)), Vt);
+    CHECK(matmul_close(
+        A_again,
+        A,
+        {U_slice, diag(S), Vt},
+        p,
+        /* rtol = */ 1e-3,
+        /* atol = */ 1e-3));
+  });
   CHECK_EQ(U.dtype(), float32);
   CHECK_EQ(S.dtype(), float32);
   CHECK_EQ(Vt.dtype(), float32);
@@ -432,10 +494,12 @@ TEST_CASE("test matrix inversion") {
   const auto A_inv = linalg::inv(A, Device::cpu);
   const auto identity = eye(A.shape(0));
 
-  CHECK(allclose(matmul(A, A_inv), identity, /* rtol = */ 0, /* atol = */ 1e-6)
-            .item<bool>());
-  CHECK(allclose(matmul(A_inv, A), identity, /* rtol = */ 0, /* atol = */ 1e-6)
-            .item<bool>());
+  for_each_matmul_precision([&](MatmulPrecision p) {
+    CHECK(matmul_close(
+        matmul(A, A_inv), identity, {A, A_inv}, p, /* rtol = */ 0, 1e-6));
+    CHECK(matmul_close(
+        matmul(A_inv, A), identity, {A_inv, A}, p, /* rtol = */ 0, 1e-6));
+  });
 }
 
 TEST_CASE("test matrix cholesky") {
@@ -459,11 +523,16 @@ TEST_CASE("test matrix cholesky") {
   const auto A = matmul(sqrtA, transpose(sqrtA));
   const auto L = linalg::cholesky(A, /* upper = */ false, Device::cpu);
   const auto U = linalg::cholesky(A, /* upper = */ true, Device::cpu);
+  // A is itself a GPU matmul; evaluate it once so both passes check the same
+  // input.
+  eval(A, L, U);
 
-  CHECK(allclose(matmul(L, transpose(L)), A, /* rtol = */ 0, /* atol = */ 1e-6)
-            .item<bool>());
-  CHECK(allclose(matmul(transpose(U), U), A, /* rtol = */ 0, /* atol = */ 1e-6)
-            .item<bool>());
+  for_each_matmul_precision([&](MatmulPrecision p) {
+    const auto Lt = transpose(L);
+    const auto Ut = transpose(U);
+    CHECK(matmul_close(matmul(L, Lt), A, {L, Lt}, p, /* rtol = */ 0, 1e-6));
+    CHECK(matmul_close(matmul(Ut, U), A, {Ut, U}, p, /* rtol = */ 0, 1e-6));
+  });
 }
 
 TEST_CASE("test matrix pseudo-inverse") {
@@ -477,12 +546,17 @@ TEST_CASE("test matrix pseudo-inverse") {
   { // Square m == n
     const auto A = array({1.0, 2.0, 3.0, 4.0}, {2, 2});
     const auto A_pinv = linalg::pinv(A, Device::cpu);
-    const auto A_again = matmul(matmul(A, A_pinv), A);
-    CHECK(allclose(A_again, A, /* rtol = */ 1e-5, /* atol = */ 1e-5)
-              .item<bool>());
-    const auto A_pinv_again = matmul(matmul(A_pinv, A), A_pinv);
-    CHECK(allclose(A_pinv_again, A_pinv, /* rtol = */ 1e-5, /* atol = */ 1e-5)
-              .item<bool>());
+    for_each_matmul_precision([&](MatmulPrecision p) {
+      CHECK(matmul_close(
+          matmul(matmul(A, A_pinv), A), A, {A, A_pinv, A}, p, 1e-5, 1e-5));
+      CHECK(matmul_close(
+          matmul(matmul(A_pinv, A), A_pinv),
+          A_pinv,
+          {A_pinv, A, A_pinv},
+          p,
+          1e-5,
+          1e-5));
+    });
   }
   { // Rectangular matrix m < n
     const auto prng_key = random::key(42);
@@ -491,12 +565,17 @@ TEST_CASE("test matrix pseudo-inverse") {
     const auto zeros = zeros_like(A_pinv, Device::cpu);
     CHECK_FALSE(allclose(zeros, A_pinv, /* rtol = */ 0, /* atol = */ 1e-6)
                     .item<bool>());
-    const auto A_again = matmul(matmul(A, A_pinv), A);
-    CHECK(allclose(A_again, A, /* rtol = */ 1e-5, /* atol = */ 1e-5)
-              .item<bool>());
-    const auto A_pinv_again = matmul(matmul(A_pinv, A), A_pinv);
-    CHECK(allclose(A_pinv_again, A_pinv, /* rtol = */ 1e-5, /* atol = */ 1e-5)
-              .item<bool>());
+    for_each_matmul_precision([&](MatmulPrecision p) {
+      CHECK(matmul_close(
+          matmul(matmul(A, A_pinv), A), A, {A, A_pinv, A}, p, 1e-5, 1e-5));
+      CHECK(matmul_close(
+          matmul(matmul(A_pinv, A), A_pinv),
+          A_pinv,
+          {A_pinv, A, A_pinv},
+          p,
+          1e-5,
+          1e-5));
+    });
   }
   { // Rectangular matrix m > n
     const auto prng_key = random::key(10);
@@ -505,12 +584,17 @@ TEST_CASE("test matrix pseudo-inverse") {
     const auto zeros2 = zeros_like(A_pinv, Device::cpu);
     CHECK_FALSE(allclose(zeros2, A_pinv, /* rtol = */ 0, /* atol = */ 1e-6)
                     .item<bool>());
-    const auto A_again = matmul(matmul(A, A_pinv), A);
-    CHECK(allclose(A_again, A, /* rtol = */ 1e-5, /* atol = */ 1e-5)
-              .item<bool>());
-    const auto A_pinv_again = matmul(matmul(A_pinv, A), A_pinv);
-    CHECK(allclose(A_pinv_again, A_pinv, /* rtol = */ 1e-5, /* atol = */ 1e-5)
-              .item<bool>());
+    for_each_matmul_precision([&](MatmulPrecision p) {
+      CHECK(matmul_close(
+          matmul(matmul(A, A_pinv), A), A, {A, A_pinv, A}, p, 1e-5, 1e-5));
+      CHECK(matmul_close(
+          matmul(matmul(A_pinv, A), A_pinv),
+          A_pinv,
+          {A_pinv, A, A_pinv},
+          p,
+          1e-5,
+          1e-5));
+    });
   }
 }
 
@@ -585,16 +669,15 @@ TEST_CASE("test matrix eigh") {
             /* atol = */ 1e-5)
             .item<bool>());
 
-  // Verify orthogonality of eigenvectors
-  CHECK(allclose(
-            matmul(eigvecs, transpose(eigvecs)),
-            eye(2),
-            /* rtol = */ 1e-5,
-            /* atol = */ 1e-5)
-            .item<bool>());
+  for_each_matmul_precision([&](MatmulPrecision p) {
+    const auto Vt = transpose(eigvecs);
+    // Verify orthogonality of eigenvectors
+    CHECK(matmul_close(
+        matmul(eigvecs, Vt), eye(2), {eigvecs, Vt}, p, 1e-5, 1e-5));
 
-  // Verify eigendecomposition
-  CHECK(allclose(matmul(A, eigvecs), eigvals * eigvecs).item<bool>());
+    // Verify eigendecomposition
+    CHECK(matmul_close(matmul(A, eigvecs), eigvals * eigvecs, {A, eigvecs}, p));
+  });
 }
 
 TEST_CASE("test lu") {
@@ -602,22 +685,25 @@ TEST_CASE("test lu") {
   array a = array({1., 2., 3., 4.}, {2, 2});
   auto out = linalg::lu(a, Device::cpu);
   auto L = take_along_axis(out[1], expand_dims(out[0], -1), -2);
-  array expected = matmul(L, out[2]);
-  CHECK(allclose(a, expected).item<bool>());
+  for_each_matmul_precision([&](MatmulPrecision p) {
+    CHECK(matmul_close(matmul(L, out[2]), a, {L, out[2]}, p));
+  });
 
   // Test 3x3 matrix
   a = array({1., 2., 3., 4., 5., 6., 7., 8., 10.}, {3, 3});
   out = linalg::lu(a, Device::cpu);
   L = take_along_axis(out[1], expand_dims(out[0], -1), -2);
-  expected = matmul(L, out[2]);
-  CHECK(allclose(a, expected).item<bool>());
+  for_each_matmul_precision([&](MatmulPrecision p) {
+    CHECK(matmul_close(matmul(L, out[2]), a, {L, out[2]}, p));
+  });
 
   // Test batch dimension
   a = broadcast_to(a, {3, 3, 3});
   out = linalg::lu(a, Device::cpu);
   L = take_along_axis(out[1], expand_dims(out[0], -1), -2);
-  expected = matmul(L, out[2]);
-  CHECK(allclose(a, expected).item<bool>());
+  for_each_matmul_precision([&](MatmulPrecision p) {
+    CHECK(matmul_close(matmul(L, out[2]), a, {L, out[2]}, p));
+  });
 }
 
 TEST_CASE("test solve") {
@@ -639,35 +725,45 @@ TEST_CASE("test solve") {
   b = array({8., 13.}, {2});
 
   array result = linalg::solve(a, b, Device::cpu);
-  CHECK(allclose(matmul(a, result), b).item<bool>());
+  for_each_matmul_precision([&](MatmulPrecision p) {
+    CHECK(matmul_close(matmul(a, result), b, {a, result}, p));
+  });
 
   // Test 3x3 matrix
   a = array({1., 2., 3., 4., 5., 6., 7., 8., 10.}, {3, 3});
   b = array({6., 15., 25.}, {3, 1});
 
   result = linalg::solve(a, b, Device::cpu);
-  CHECK(allclose(matmul(a, result), b).item<bool>());
+  for_each_matmul_precision([&](MatmulPrecision p) {
+    CHECK(matmul_close(matmul(a, result), b, {a, result}, p));
+  });
 
   // Test batch dimension
   a = broadcast_to(a, {5, 3, 3});
   b = broadcast_to(b, {5, 3, 1});
 
   result = linalg::solve(a, b, Device::cpu);
-  CHECK(allclose(matmul(a, result), b).item<bool>());
+  for_each_matmul_precision([&](MatmulPrecision p) {
+    CHECK(matmul_close(matmul(a, result), b, {a, result}, p));
+  });
 
   // Test multi-column rhs
   a = array({2., 1., 1., 1., 3., 2., 1., 0., 0.}, {3, 3});
   b = array({4., 2., 5., 3., 6., 1.}, {3, 2});
 
   result = linalg::solve(a, b, Device::cpu);
-  CHECK(allclose(matmul(a, result), b).item<bool>());
+  for_each_matmul_precision([&](MatmulPrecision p) {
+    CHECK(matmul_close(matmul(a, result), b, {a, result}, p));
+  });
 
   // Test batch multi-column rhs
   a = broadcast_to(a, {5, 3, 3});
   b = broadcast_to(b, {5, 3, 2});
 
   result = linalg::solve(a, b, Device::cpu);
-  CHECK(allclose(matmul(a, result), b).item<bool>());
+  for_each_matmul_precision([&](MatmulPrecision p) {
+    CHECK(matmul_close(matmul(a, result), b, {a, result}, p));
+  });
 }
 
 TEST_CASE("test solve_triangluar") {
