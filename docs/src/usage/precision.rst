@@ -19,3 +19,18 @@ To keep these operations in full ``float32``, set
 
 Which operations take the reduced-precision path, and how large the
 difference is, depends on the backend and the hardware.
+
+The setting can also be changed while the program runs, for the whole process
+or for a block of code in the current thread:
+
+.. code-block:: python
+
+  mx.config.update("MLX_ENABLE_TF32", 0)  # full float32 from here on
+
+  with mx.config.scoped_update(MLX_ENABLE_TF32=1):
+      y = a @ b
+      mx.eval(y)
+
+The precision is chosen when an operation is evaluated, not when it is
+recorded, so evaluate inside the block any result that should use the scoped
+setting.
