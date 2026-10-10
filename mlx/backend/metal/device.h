@@ -260,6 +260,6 @@ std::unordered_map<int, CommandEncoder>& get_command_encoders();
 std::unordered_map<int, CommandEncoder>& get_global_command_encoders();
 NS::SharedPtr<NS::AutoreleasePool> new_scoped_memory_pool();
 
-bool is_nax_available();
+MLX_API bool is_nax_available();
 
 } // namespace mlx::core::metal
