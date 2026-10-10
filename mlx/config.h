@@ -19,6 +19,9 @@ class MLX_API ScopedUpdate {
  public:
   ScopedUpdate(ConfigDict configs);
   ScopedUpdate(const ScopedUpdate& other);
+  // Copying pushes a new scope; assigning would make two guards share one
+  // scope entry and erase it twice.
+  ScopedUpdate& operator=(const ScopedUpdate&) = delete;
   ~ScopedUpdate();
 
  private:
