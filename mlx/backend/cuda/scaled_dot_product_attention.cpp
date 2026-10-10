@@ -319,7 +319,9 @@ bool supports_sdpa_cudnn(
     bool has_arr_mask,
     bool do_causal,
     Stream s) {
-  bool enabled = config::get("MLX_CUDA_USE_CUDNN_SDPA", 1);
+  if (!config::get("MLX_CUDA_USE_CUDNN_SDPA", 1)) {
+    return false;
+  }
 
   // cuDNN SDPA requires Ampere and later.
   if (cu::device(s.device).compute_capability_major() < 8) {
