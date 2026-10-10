@@ -31,3 +31,18 @@ To disable Winograd, set :envvar:`MLX_CONV_WINOGRAD` to ``0``:
 .. code-block:: shell
 
   MLX_CONV_WINOGRAD=0 python my_script.py
+
+The setting can also be changed while the program runs, for the whole process
+or for a block of code in the current thread:
+
+.. code-block:: python
+
+  mx.config.update("MLX_ENABLE_TF32", 0)  # full float32 from here on
+
+  with mx.config.scoped_update(MLX_ENABLE_TF32=1):
+      y = a @ b
+      mx.eval(y)
+
+The precision is chosen when an operation is evaluated, not when it is
+recorded, so evaluate inside the block any result that should use the scoped
+setting.
