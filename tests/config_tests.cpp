@@ -48,6 +48,21 @@ TEST_CASE("test scoped config update") {
   CHECK_EQ(config::get(name, 0), 1);
 }
 
+TEST_CASE("test config default is not cached") {
+  // The default can depend on the call site (e.g. the gated-delta chunk size
+  // depends on the sequence length); the first caller's default must not
+  // become the value every later caller sees.
+  constexpr auto name = "MLX_TEST_CONFIG_DEFAULT_NOT_CACHED";
+  CHECK_EQ(config::get(name, 1), 1);
+  CHECK_EQ(config::get(name, 8), 8);
+  CHECK_EQ(config::get(name, 16), 16);
+
+  // An explicit update still wins over every default.
+  config::update(name, 5);
+  CHECK_EQ(config::get(name, 1), 5);
+  CHECK_EQ(config::get(name, 8), 5);
+}
+
 TEST_CASE("test config handler") {
   ConfigHandlerReset reset;
   config::update("MLX_TEST_CONFIG_HANDLER", 1);

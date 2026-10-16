@@ -17,6 +17,16 @@ class TestConfig(unittest.TestCase):
             self.assertIsNone(mx.config.update(name, 42))
             self.assertEqual(mx.config.get(name, 0), 42)
 
+    def test_default_is_not_cached(self):
+        # The default can depend on the call site (e.g. the gated-delta chunk
+        # size depends on the sequence length): the first caller's default must
+        # not become the value later callers see.
+        name = "MLX_TEST_CONFIG_DEFAULT_NOT_CACHED"
+        self.assertEqual(mx.config.get(name, 1), 1)
+        self.assertEqual(mx.config.get(name, 8), 8)
+        mx.config.update(name, 5)
+        self.assertEqual(mx.config.get(name, 1), 5)
+
     def test_scoped_update(self):
         configs = {
             "MLX_TEST_1": 1,

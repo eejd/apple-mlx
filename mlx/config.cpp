@@ -2,19 +2,42 @@
 
 #include "mlx/config.h"
 
+#include <cstdlib>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
+#include <tuple>
 
 namespace mlx::core::config {
 
 namespace {
 
-inline int get_env(const char* name, int default_val) {
-  const char* str = std::getenv(name);
-  if (!str) {
-    return default_val;
+// Values read from the environment, cached on first read. A variable that is
+// not set is cached as std::nullopt: the caller's default is never stored,
+// because defaults can depend on the call site (e.g. the gated-delta chunk
+// size depends on the sequence length).
+auto& env_cache() {
+  static std::tuple<
+      std::unordered_map<std::string, std::optional<int>>,
+      std::shared_mutex>
+      cache;
+  return cache;
+}
+
+std::optional<int> get_env(const char* name) {
+  auto& [cache, mtx] = env_cache();
+  {
+    std::shared_lock lock(mtx);
+    if (auto it = cache.find(name); it != cache.end()) {
+      return it->second;
+    }
   }
-  return std::atoi(str);
+  std::optional<int> val;
+  if (const char* str = std::getenv(name)) {
+    val = std::atoi(str);
+  }
+  std::unique_lock lock(mtx);
+  return cache.emplace(name, val).first->second;
 }
 
 auto& global_configs() {
@@ -60,9 +83,9 @@ int get(const char* name, int default_val) {
       return it->second;
     }
   }
-  int val = get_env(name, default_val);
-  update(name, val);
-  return val;
+  // Then the environment. Only a value that is set is kept; a default is
+  // returned as is, never cached.
+  return get_env(name).value_or(default_val);
 }
 
 ScopedUpdate::ScopedUpdate(ConfigDict configs) {
