@@ -1524,7 +1524,7 @@ class TestConv(mlx_tests.MLXTestCase):
         winograd = np.array(mx.conv2d(xb, w, padding=1))
         self.assertFalse(np.array_equal(winograd[0], single[0]))
 
-        with mlx_tests.scoped_env(MLX_CONV_WINOGRAD="0"):
+        with mx.config.scoped_update(MLX_CONV_WINOGRAD=0):
             gemm = np.array(mx.conv2d(xb, w, padding=1))
         for i in range(3):
             self.assertTrue(np.array_equal(gemm[i], single[0]))
