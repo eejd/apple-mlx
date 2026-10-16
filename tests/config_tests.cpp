@@ -2,6 +2,7 @@
 
 #include "doctest/doctest.h"
 
+#include <cstdlib>
 #include <string>
 
 #include "mlx/config.h"
@@ -61,6 +62,19 @@ TEST_CASE("test config default is not cached") {
   config::update(name, 5);
   CHECK_EQ(config::get(name, 1), 5);
   CHECK_EQ(config::get(name, 8), 5);
+}
+
+TEST_CASE("test config environment is read once and update wins") {
+  constexpr auto name = "MLX_TEST_CONFIG_ENV_ONCE";
+  setenv(name, "13", 1);
+  CHECK_EQ(config::get(name, 0), 13);
+  // First-read semantics: a later change of the environment is not seen.
+  setenv(name, "14", 1);
+  CHECK_EQ(config::get(name, 0), 13);
+  // An update overrides the environment value, and the default never applies.
+  config::update(name, 2);
+  CHECK_EQ(config::get(name, 99), 2);
+  unsetenv(name);
 }
 
 TEST_CASE("test config handler") {

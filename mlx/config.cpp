@@ -6,42 +6,42 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <string>
+#include <string_view>
 #include <tuple>
+#include <unordered_map>
 
 namespace mlx::core::config {
 
 namespace {
 
-// Values read from the environment, cached on first read. A variable that is
-// not set is cached as std::nullopt: the caller's default is never stored,
-// because defaults can depend on the call site (e.g. the gated-delta chunk
-// size depends on the sequence length).
-auto& env_cache() {
-  static std::tuple<
-      std::unordered_map<std::string, std::optional<int>>,
-      std::shared_mutex>
-      cache;
-  return cache;
-}
+// One entry per setting name. `updated` is a value set with update();
+// `env` is the value read from the environment on first use (first-read
+// semantics; an unset variable is remembered as nullopt). The caller's default
+// is never stored: it can depend on the call site (e.g. the gated-delta chunk
+// size depends on the sequence length), so caching it would pin the first
+// caller's value for the whole process.
+struct Entry {
+  std::optional<int> updated;
+  std::optional<int> env;
+  bool env_read = false;
+};
 
-std::optional<int> get_env(const char* name) {
-  auto& [cache, mtx] = env_cache();
-  {
-    std::shared_lock lock(mtx);
-    if (auto it = cache.find(name); it != cache.end()) {
-      return it->second;
-    }
+// Keyed by std::string, looked up by std::string_view (transparent hash and
+// equality): a lookup allocates nothing. config::get is called on hot paths
+// (once per matmul/attention evaluation), and this keeps it a single lookup.
+struct StringHash {
+  using is_transparent = void;
+  size_t operator()(std::string_view s) const {
+    return std::hash<std::string_view>{}(s);
   }
-  std::optional<int> val;
-  if (const char* str = std::getenv(name)) {
-    val = std::atoi(str);
-  }
-  std::unique_lock lock(mtx);
-  return cache.emplace(name, val).first->second;
-}
+};
+
+using Entries =
+    std::unordered_map<std::string, Entry, StringHash, std::equal_to<>>;
 
 auto& global_configs() {
-  static std::tuple<ConfigDict, std::shared_mutex> configs_and_mtx;
+  static std::tuple<Entries, std::shared_mutex> configs_and_mtx;
   return configs_and_mtx;
 }
 
@@ -60,7 +60,7 @@ auto& config_handler() {
 void update(const char* name, int val) {
   auto& [configs, mtx] = global_configs();
   std::unique_lock lock(mtx);
-  configs[name] = val;
+  configs[name].updated = val;
 }
 
 int get(const char* name, int default_val) {
@@ -75,17 +75,32 @@ int get(const char* name, int default_val) {
       return it->second;
     }
   }
-  // Then try global configs.
+  // Then the global value: an update(), else the environment.
   auto& [configs, mtx] = global_configs();
   {
     std::shared_lock lock(mtx);
-    if (auto it = configs.find(name); it != configs.end()) {
-      return it->second;
+    if (auto it = configs.find(std::string_view(name)); it != configs.end()) {
+      const Entry& e = it->second;
+      if (e.updated) {
+        return *e.updated;
+      }
+      if (e.env_read) {
+        return e.env.value_or(default_val);
+      }
     }
   }
-  // Then the environment. Only a value that is set is kept; a default is
-  // returned as is, never cached.
-  return get_env(name).value_or(default_val);
+  // First use of this name: read the environment once.
+  std::optional<int> env;
+  if (const char* str = std::getenv(name)) {
+    env = std::atoi(str);
+  }
+  std::unique_lock lock(mtx);
+  Entry& e = configs[name];
+  if (!e.env_read) {
+    e.env = env;
+    e.env_read = true;
+  }
+  return e.updated ? *e.updated : e.env.value_or(default_val);
 }
 
 ScopedUpdate::ScopedUpdate(ConfigDict configs) {

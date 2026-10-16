@@ -16,5 +16,5 @@ Retired from `local` at v0.32.4: the macOS 27 SDK NAX cooperative-tensor build f
 (`ml-explore/mlx#4594`, merged upstream and contained in v0.32.4).
 
 Pre-rebase tip (base v0.32.3): tag `archive/local-pre-rebase-78e357d` (branch `macports/v0.32.3` is stale, kept for history).
-Tags: `v0.32.4-local01` (superseded: config cached the first caller's default) and `v0.32.4-local02`.
+Tags: `v0.32.4-local01` (superseded: config cached the first caller's default), `v0.32.4-local02` (superseded by the single-lookup rewrite) and `v0.32.4-local03`.
 `archive/local-unmerged-branch-82afd34`: the `local` branch ref as first pushed, which did not match the `local01` tag.
